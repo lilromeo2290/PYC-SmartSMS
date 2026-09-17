@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePerm, jsonError } from '@/lib/auth';
+import { recordAudit } from '@/lib/audit';
 import { PERMISSIONS, ROLE_LABELS } from '@/lib/permissions';
 
 export async function GET(req: NextRequest) {
