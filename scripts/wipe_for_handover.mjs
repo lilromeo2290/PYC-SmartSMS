@@ -8,10 +8,12 @@
 import { PrismaClient } from '@prisma/client';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const db = new PrismaClient();
-const DB_FILE = '/home/z/my-project/db/custom.db';
-const BACKUP_DIR = '/home/z/my-project/backups';
+const DB_FILE = path.resolve(__dirname, '..', 'db', 'custom.db');
+const BACKUP_DIR = path.resolve(__dirname, '..', 'backups');
 
 async function main() {
   // 1. Checkpoint WAL so the file copy is complete
