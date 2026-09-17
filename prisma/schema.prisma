@@ -1,0 +1,328 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============ USERS & PERMISSIONS ============
+
+model User {
+  id               String    @id @default(cuid())
+  username         String    @unique
+  email            String?
+  passwordHash     String
+  fullName         String
+  phone            String?
+  role             String    @default("VIEWER") // SUPER_ADMIN | SMS_MANAGER | EVENT_COORDINATOR | VIEWER
+  extraPermissions String    @default("[]") // JSON array of extra permission keys
+  deniedPermissions String   @default("[]") // JSON array of denied permission keys
+  isActive         Boolean   @default(true)
+  lastLoginAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  auditLogs        AuditLog[]
+}
+
+model Permission {
+  key         String @id // e.g. members.create
+  module      String
+  description String
+  sortOrder   Int    @default(0)
+}
+
+model RolePermission {
+  role          String
+  permissionKey String
+  allowed       Boolean @default(true)
+
+  @@id([role, permissionKey])
+}
+
+// ============ MEMBERS ============
+
+model Member {
+  id            String   @id @default(cuid())
+  memberCode    String   @unique // PYC-0001
+  firstName     String
+  middleName    String?
+  lastName      String
+  phone         String // normalized E.164 e.g. +233241234567
+  altPhone      String?
+  email         String?
+  dateOfBirth   String // "YYYY-MM-DD" (Accra calendar date)
+  gender        String? // MALE | FEMALE | OTHER
+  category      String   @default("GENERAL") // EXECUTIVE | GENERAL | PATRON | HONORARY | ASSOCIATE
+  groupId       String?
+  group         MemberGroup? @relation(fields: [groupId], references: [id])
+  dateJoined    String?
+  status        String   @default("ACTIVE") // ACTIVE | INACTIVE | SUSPENDED
+  smsPermission Boolean  @default(true) // if false -> NO automated SMS
+  address       String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  duesRecords DuesRecord[]
+  smsMessages SmsMessage[]
+  executions  AutomationExecution[]
+
+  @@index([status])
+  @@index([dateOfBirth])
+  @@index([phone])
+  @@index([groupId])
+}
+
+model MemberGroup {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  color       String   @default("#059669")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  members     Member[]
+  automations Automation[]
+  meetings    Meeting[]
+  events      Event[]
+}
+
+// ============ MEETINGS / EVENTS / DUES ============
+
+model Meeting {
+  id            String   @id @default(cuid())
+  name          String
+  date          String // "YYYY-MM-DD" (Accra)
+  startTime     String // "HH:mm"
+  endTime       String?
+  venue         String
+  description   String?
+  organizer     String?
+  targetGroupId String?
+  targetGroup   MemberGroup? @relation(fields: [targetGroupId], references: [id])
+  status        String   @default("SCHEDULED") // SCHEDULED | COMPLETED | CANCELLED
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  automations Automation[]
+
+  @@index([date, status])
+}
+
+model Event {
+  id            String   @id @default(cuid())
+  name          String
+  date          String // "YYYY-MM-DD" (Accra)
+  startTime     String
+  endTime       String?
+  venue         String
+  description   String?
+  eventType     String? // ANNIVERSARY | CONFERENCE | FUNDRAISER | OUTREACH | PROGRAM | SOCIAL
+  organizer     String?
+  targetGroupId String?
+  targetGroup   MemberGroup? @relation(fields: [targetGroupId], references: [id])
+  status        String   @default("SCHEDULED")
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  automations Automation[]
+
+  @@index([date, status])
+}
+
+model DuesRecord {
+  id            String   @id @default(cuid())
+  memberId      String
+  member        Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  amount        Float
+  currency      String   @default("GHS")
+  dueDate       String // "YYYY-MM-DD"
+  period        String? // e.g. "September 2026"
+  paymentStatus String   @default("UNPAID") // UNPAID | PARTIAL | PAID
+  reminderDate  String? // explicit override "YYYY-MM-DD"
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([dueDate, paymentStatus])
+  @@index([memberId])
+}
+
+// ============ TEMPLATES & VARIABLES ============
+
+model SmsTemplate {
+  id         String   @id @default(cuid())
+  name       String   @unique
+  category   String   @default("GENERAL") // BIRTHDAY | MEETING | EVENT | DUES | GENERAL | CUSTOM
+  message    String
+  status     String   @default("ACTIVE") // ACTIVE | INACTIVE
+  usageCount Int      @default(0)
+  createdById String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  automations Automation[]
+}
+
+model SmsVariable {
+  key          String  @id // first_name (without braces)
+  display      String
+  source       String // member | club | event | meeting | dues | system
+  description  String
+  exampleValue String
+  isActive     Boolean @default(true)
+  sortOrder    Int     @default(0)
+}
+
+// ============ AUTOMATION ENGINE ============
+
+model Automation {
+  id           String   @id @default(cuid())
+  name         String
+  type         String // BIRTHDAY | MEETING_REMINDER | EVENT_REMINDER | DUES | CUSTOM
+  triggerType  String // BIRTHDAY | BEFORE_MEETING | BEFORE_EVENT | DUES | SPECIFIC_DATE | MONTHLY | WEEKLY | DAILY
+  description  String?
+  config       String   @default("{}") // JSON: {sendTime, offsets[], dayOfMonth, weekday, specificDate, months[]}
+  audienceType String   @default("ALL_ACTIVE") // ALL_ACTIVE | GROUP | SELECTED | DUES_RECORDS
+  groupId      String?
+  group        MemberGroup? @relation(fields: [groupId], references: [id])
+  memberIds    String   @default("[]") // JSON array of member ids
+  meetingId    String? // optional specific meeting (null = all scheduled meetings)
+  meeting      Meeting? @relation(fields: [meetingId], references: [id])
+  eventId      String? // optional specific event
+  event        Event?   @relation(fields: [eventId], references: [id])
+  templateId   String?
+  template     SmsTemplate? @relation(fields: [templateId], references: [id])
+  status       String   @default("ACTIVE") // ACTIVE | INACTIVE
+  lastRunAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  executions AutomationExecution[]
+
+  @@index([status, triggerType])
+}
+
+model AutomationExecution {
+  id               String   @id @default(cuid())
+  automationId     String?
+  automation       Automation? @relation(fields: [automationId], references: [id])
+  automationName   String // snapshot
+  dedupeKey        String   @unique // duplicate protection
+  recipientMemberId String?
+  recipient        Member?  @relation(fields: [recipientMemberId], references: [id])
+  recipientName    String
+  recipientPhone   String
+  message          String
+  status           String   @default("PENDING") // PENDING | SENT | FAILED | SKIPPED
+  reason           String? // e.g. "SMS skipped — member has SMS disabled."
+  context          String? // JSON snapshot {birthday, meetingId, offset, duesId...}
+  smsMessageId     String?
+  executedAt       DateTime @default(now())
+
+  @@index([automationId, executedAt])
+  @@index([status])
+}
+
+// ============ SMS MESSAGING ============
+
+model ScheduledSms {
+  id             String   @id @default(cuid())
+  name           String?
+  recipientMemberIds String @default("[]") // JSON array
+  recipientPhones    String @default("[]") // JSON array of raw/extra phones
+  recipientCount Int      @default(0)
+  message        String
+  templateId     String?
+  scheduledDate  String // "YYYY-MM-DD" Accra
+  scheduledTime  String // "HH:mm"
+  status         String   @default("PENDING") // PENDING | SENT | CANCELLED | FAILED | PARTIAL
+  sentAt         DateTime?
+  error          String?
+  createdById    String?
+  createdAt      DateTime @default(now())
+
+  @@index([status, scheduledDate])
+}
+
+model SmsMessage {
+  id                String   @id @default(cuid())
+  recipientMemberId String?
+  recipient         Member?  @relation(fields: [recipientMemberId], references: [id], onDelete: SetNull)
+  recipientName     String
+  phone             String
+  message           String
+  type              String   @default("MANUAL") // MANUAL | GROUP | SCHEDULED | AUTOMATED
+  automationId      String?
+  automationName    String?
+  scheduledSmsId    String?
+  templateId        String?
+  status            String   @default("QUEUED") // QUEUED | SENT | DELIVERED | FAILED
+  providerRef       String?
+  providerResponse  String?
+  error             String?
+  attempts          Int      @default(0)
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  createdById       String?
+  createdAt         DateTime @default(now())
+
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model SmsProviderConfig {
+  id           String   @id @default("default")
+  providerType String   @default("simulator") // simulator | generic_http
+  name         String   @default("Built-in Simulator")
+  apiUrl       String?
+  apiMethod    String   @default("GET") // GET | POST
+  apiKeyEnc    String? // AES-256-GCM encrypted
+  senderId     String?
+  username     String?
+  passwordEnc  String? // AES-256-GCM encrypted
+  paramTpl     String? // query/body template with {phone} {message} {sender} {apikey} {password} {username} placeholders
+  extraConfig  String   @default("{}") // JSON misc settings
+  isActive     Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+}
+
+// ============ CLUB & SYSTEM ============
+
+model ClubInfo {
+  id         String  @id @default("default")
+  name       String  @default("Progressive Youth Club")
+  shortName  String  @default("PYC")
+  phone      String?
+  email      String?
+  address    String?
+  website    String?
+  logoUrl    String?
+  senderName String  @default("PYC-CLUB")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userName  String?
+  action    String // MEMBER_CREATED, SMS_SENT, ...
+  module    String // MEMBERS, SMS, AUTOMATION, SETTINGS, USERS, AUTH
+  target    String?
+  details   String?
+  status    String   @default("SUCCESS") // SUCCESS | FAILED
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([module])
+}
+
+model SystemSetting {
+  key   String @id
+  value String
+}
